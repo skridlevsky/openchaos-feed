@@ -589,6 +589,8 @@ type GitHubComment struct {
 		Login string `json:"login"`
 		ID    int64  `json:"id"`
 	} `json:"user"`
+	IssueURL  string    `json:"issue_url"`
+	HTMLURL   string    `json:"html_url"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

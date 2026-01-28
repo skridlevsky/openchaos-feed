@@ -133,6 +133,15 @@ func (s *Store) UpdateCommentEdit(ctx context.Context, commentID int64, newPaylo
 	return nil
 }
 
+// DeleteByType removes all events of a given type. Returns the number of rows deleted.
+func (s *Store) DeleteByType(ctx context.Context, eventType EventType) (int64, error) {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM events WHERE type = $1`, eventType)
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete events by type: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // DeleteByCommentID removes a comment event when it gets deleted on GitHub
 func (s *Store) DeleteByCommentID(ctx context.Context, commentID int64) error {
 	query := `DELETE FROM events WHERE comment_id = $1`

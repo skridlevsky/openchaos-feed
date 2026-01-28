@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"log"
 	"log/slog"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -148,6 +150,16 @@ func main() {
 		}
 	}
 
+	// Build lookup maps for resolving comment parents
+	prByNumber := make(map[int]*github.GitHubPR, len(prs))
+	for _, pr := range prs {
+		prByNumber[pr.Number] = pr
+	}
+	issueByNumber := make(map[int]*github.GitHubIssue, len(issues))
+	for i := range issues {
+		issueByNumber[issues[i].Number] = &issues[i]
+	}
+
 	// Step 3: PR Reactions (THE VOTES!)
 	log.Println("Step 3/9: Fetching PR reactions (THE VOTES!)...")
 	totalReactions := 0
@@ -270,22 +282,62 @@ func main() {
 
 	// Step 5: Fetch all comments
 	log.Println("Step 5/9: Fetching all comments...")
+
+	// Delete old comment events first (they have flat payload shape, not Events API shape)
+	deleted, err := store.DeleteByType(ctx, feed.EventIssueComment)
+	if err != nil {
+		log.Fatalf("Failed to delete old comment events: %v", err)
+	}
+	if deleted > 0 {
+		log.Printf("  Deleted %d old comment events (will re-insert with correct payload shape)\n", deleted)
+	}
+
 	comments, err := githubClient.GetAllComments(ctx, owner, repo)
 	if err != nil {
 		log.Fatalf("Failed to fetch comments: %v", err)
 	}
 	log.Printf("Found %d comments\n", len(comments))
 
-	// Insert comment events
+	// Insert comment events with Events API-shaped payloads
 	for i, comment := range comments {
 		commentID := comment.ID
 		githubID := comment.ID
-		payload, _ := json.Marshal(comment)
+
+		// Resolve parent issue/PR from the comment's issue_url
+		parentNumber := parseIssueNumber(comment.IssueURL)
+		var prNumber, issueNumber *int
+		var parentTitle string
+
+		if pr, ok := prByNumber[parentNumber]; ok {
+			prNumber = &parentNumber
+			parentTitle = pr.Title
+		} else if issue, ok := issueByNumber[parentNumber]; ok {
+			issueNumber = &parentNumber
+			parentTitle = issue.Title
+		}
+
+		// Build Events API-shaped payload: {action, issue: {number, title, ...}, comment: {id, body, ...}}
+		payload, _ := json.Marshal(map[string]interface{}{
+			"action": "created",
+			"issue": map[string]interface{}{
+				"number": parentNumber,
+				"title":  parentTitle,
+			},
+			"comment": map[string]interface{}{
+				"id":         comment.ID,
+				"body":       comment.Body,
+				"user":       comment.User,
+				"created_at": comment.CreatedAt,
+				"updated_at": comment.UpdatedAt,
+			},
+		})
 
 		event := &feed.Event{
 			Type:         feed.EventIssueComment,
 			GitHubUser:   comment.User.Login,
 			GitHubUserID: comment.User.ID,
+			PRNumber:     prNumber,
+			IssueNumber:  issueNumber,
 			CommentID:    &commentID,
 			GitHubID:     &githubID,
 			Payload:      payload,
@@ -564,6 +616,17 @@ func parseTime(timeStr string) time.Time {
 func computeContentHash(payload []byte) string {
 	hash := sha256.Sum256(payload)
 	return hex.EncodeToString(hash[:])
+}
+
+// parseIssueNumber extracts the issue/PR number from a GitHub issue_url.
+// Format: https://api.github.com/repos/{owner}/{repo}/issues/{number}
+func parseIssueNumber(issueURL string) int {
+	idx := strings.LastIndex(issueURL, "/")
+	if idx < 0 || idx+1 >= len(issueURL) {
+		return 0
+	}
+	n, _ := strconv.Atoi(issueURL[idx+1:])
+	return n
 }
 
 func checkRateLimit(ctx context.Context, client *github.Client) {
