@@ -1,0 +1,13 @@
+.env
+.env.local
+
+# Go binaries
+/server
+/backfill
+/app
+*.exe
+
+# Next.js
+/web/node_modules
+/web/.next
+/web/out
