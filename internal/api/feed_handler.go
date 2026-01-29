@@ -565,29 +565,63 @@ var commentEventTypes = map[feed.EventType]bool{
 	feed.EventDiscussionComment: true,
 }
 
-// attachReactionSummaries collects comment IDs from comment-type events,
+// prEventTypes are PR lifecycle events that should show reaction summaries.
+var prEventTypes = map[feed.EventType]bool{
+	feed.EventPROpened:   true,
+	feed.EventPRClosed:   true,
+	feed.EventPRMerged:   true,
+	feed.EventPRReopened: true,
+}
+
+// attachReactionSummaries collects comment IDs and PR numbers from events,
 // queries their aggregated reactions, and attaches them inline.
 func attachReactionSummaries(ctx context.Context, store *feed.Store, events []*feed.Event) {
+	// Collect comment IDs
 	var commentIDs []int64
 	for _, e := range events {
 		if e.CommentID != nil && commentEventTypes[e.Type] {
 			commentIDs = append(commentIDs, *e.CommentID)
 		}
 	}
-	if len(commentIDs) == 0 {
-		return
-	}
 
-	counts, err := store.GetCommentReactionCounts(ctx, commentIDs)
-	if err != nil {
-		slog.Warn("Failed to fetch comment reaction counts", "error", err)
-		return
-	}
-
+	// Collect PR numbers from PR lifecycle events
+	var prNumbers []int
+	seenPRs := map[int]bool{}
 	for _, e := range events {
-		if e.CommentID != nil {
-			if summary, ok := counts[*e.CommentID]; ok {
-				e.ReactionSummary = summary
+		if e.PRNumber != nil && prEventTypes[e.Type] && !seenPRs[*e.PRNumber] {
+			prNumbers = append(prNumbers, *e.PRNumber)
+			seenPRs[*e.PRNumber] = true
+		}
+	}
+
+	// Fetch comment reaction counts
+	if len(commentIDs) > 0 {
+		counts, err := store.GetCommentReactionCounts(ctx, commentIDs)
+		if err != nil {
+			slog.Warn("Failed to fetch comment reaction counts", "error", err)
+		} else {
+			for _, e := range events {
+				if e.CommentID != nil {
+					if summary, ok := counts[*e.CommentID]; ok {
+						e.ReactionSummary = summary
+					}
+				}
+			}
+		}
+	}
+
+	// Fetch PR reaction counts
+	if len(prNumbers) > 0 {
+		counts, err := store.GetPRReactionCounts(ctx, prNumbers)
+		if err != nil {
+			slog.Warn("Failed to fetch PR reaction counts", "error", err)
+		} else {
+			for _, e := range events {
+				if e.PRNumber != nil && prEventTypes[e.Type] {
+					if summary, ok := counts[*e.PRNumber]; ok {
+						e.ReactionSummary = summary
+					}
+				}
 			}
 		}
 	}

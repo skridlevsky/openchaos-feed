@@ -617,6 +617,15 @@ func main() {
 		log.Printf("Total discussion events captured: %d\n", discussionEvents)
 	}
 
+	// Cleanup: deduplicate star/fork events (backfill + ingester can create duplicates)
+	log.Println("Deduplicating star/fork events...")
+	deduped, err := store.DeduplicateStarsForks(ctx)
+	if err != nil {
+		log.Printf("Warning: Failed to deduplicate stars/forks: %v\n", err)
+	} else if deduped > 0 {
+		log.Printf("  Removed %d duplicate star/fork events\n", deduped)
+	}
+
 	// Final summary
 	log.Println("\n=== Backfill Complete ===")
 	log.Printf("PRs: %d\n", len(prs))

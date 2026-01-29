@@ -72,16 +72,17 @@ export function ExpandableText({ text }: { text: string }) {
                 );
               },
               a: ({ href, children }) => {
-                if (!href || (typeof href === "string" && !isAllowedHost(href))) {
-                  return (
-                    <span className="text-zinc-600 italic" title="External link redacted — view on GitHub">
-                      [{children}]
-                    </span>
-                  );
-                }
+                if (!href) return <span>{children}</span>;
+                const external = typeof href === "string" && !isAllowedHost(href);
                 return (
-                  <a href={href} target="_blank" rel="noopener noreferrer">
-                    {children}
+                  <a
+                    href={href}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className={external ? "external-link" : undefined}
+                    title={external ? "External link — opens in new tab" : undefined}
+                  >
+                    {children}{external && " \u2197"}
                   </a>
                 );
               },

@@ -51,6 +51,13 @@ func (s *Store) Insert(ctx context.Context, event *Event) error {
 			  AND e.github_user = n.github_user
 			  AND e.occurred_at = n.occurred_at
 		)
+		-- Stars and forks: one per user (backfill and ingester use different github_ids)
+		AND NOT EXISTS (
+			SELECT 1 FROM events e
+			WHERE e.type = n.type
+			  AND e.github_user = n.github_user
+			  AND n.type IN ('star', 'fork')
+		)
 		ON CONFLICT (github_id) DO NOTHING
 		RETURNING id, ingested_at
 	`
@@ -131,6 +138,26 @@ func (s *Store) UpdateCommentEdit(ctx context.Context, commentID int64, newPaylo
 		return fmt.Errorf("comment %d not found", commentID)
 	}
 	return nil
+}
+
+// DeduplicateStarsForks removes duplicate star/fork events, keeping the earliest per user.
+func (s *Store) DeduplicateStarsForks(ctx context.Context) (int64, error) {
+	query := `
+		DELETE FROM events
+		WHERE id IN (
+			SELECT id FROM (
+				SELECT id, ROW_NUMBER() OVER (PARTITION BY type, github_user ORDER BY occurred_at ASC) as rn
+				FROM events
+				WHERE type IN ('star', 'fork')
+			) sub
+			WHERE sub.rn > 1
+		)
+	`
+	tag, err := s.pool.Exec(ctx, query)
+	if err != nil {
+		return 0, fmt.Errorf("failed to deduplicate stars/forks: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // DeleteByType removes all events of a given type. Returns the number of rows deleted.
@@ -575,6 +602,44 @@ func (s *Store) GetCommentReactionCounts(ctx context.Context, commentIDs []int64
 			result[commentID] = make(map[string]int)
 		}
 		result[commentID][reactionType] = count
+	}
+
+	return result, nil
+}
+
+// GetPRReactionCounts returns aggregated reaction counts per PR number.
+// Only counts PR-level reactions (comment_id IS NULL), not comment reactions.
+// Returns map[prNumber] -> map[reactionType] -> count.
+func (s *Store) GetPRReactionCounts(ctx context.Context, prNumbers []int) (map[int]map[string]int, error) {
+	if len(prNumbers) == 0 {
+		return nil, nil
+	}
+
+	query := `
+		SELECT pr_number, reaction_type, COUNT(*) as cnt
+		FROM events
+		WHERE type = 'reaction' AND pr_number = ANY($1) AND comment_id IS NULL AND reaction_type IS NOT NULL
+		GROUP BY pr_number, reaction_type
+	`
+
+	rows, err := s.pool.Query(ctx, query, prNumbers)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get PR reaction counts: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[int]map[string]int)
+	for rows.Next() {
+		var prNumber int
+		var reactionType string
+		var count int
+		if err := rows.Scan(&prNumber, &reactionType, &count); err != nil {
+			return nil, fmt.Errorf("failed to scan PR reaction count: %w", err)
+		}
+		if result[prNumber] == nil {
+			result[prNumber] = make(map[string]int)
+		}
+		result[prNumber][reactionType] = count
 	}
 
 	return result, nil
