@@ -577,6 +577,9 @@ func main() {
 
 			// Discussion reactions
 			for _, reaction := range discussion.Reactions {
+				// Normalize GraphQL uppercase types (THUMBS_UP → +1)
+				reaction.Content = feed.NormalizeReactionContent(reaction.Content)
+
 				var choice *int8
 				if reaction.Content == "+1" {
 					c := int8(1)
@@ -624,6 +627,15 @@ func main() {
 		log.Printf("Warning: Failed to deduplicate stars/forks: %v\n", err)
 	} else if deduped > 0 {
 		log.Printf("  Removed %d duplicate star/fork events\n", deduped)
+	}
+
+	// Cleanup: normalize GraphQL uppercase reaction types (THUMBS_UP → +1, etc.)
+	log.Println("Normalizing reaction types...")
+	normalized, err := store.NormalizeReactionTypes(ctx)
+	if err != nil {
+		log.Printf("Warning: Failed to normalize reaction types: %v\n", err)
+	} else if normalized > 0 {
+		log.Printf("  Normalized %d reaction types\n", normalized)
 	}
 
 	// Final summary

@@ -337,9 +337,19 @@ func (s *Store) GetByUser(ctx context.Context, githubUser string) ([]*Event, err
 	return scanEvents(rows)
 }
 
-// GetVoters retrieves aggregated voting statistics for all voters
+// GetVoters retrieves aggregated voting statistics for all voters.
+// Uses "last vote wins" deduplication: if a user has both +1 and -1 on the
+// same PR, only their most recent vote counts (GitHub allows adding multiple
+// reaction types; we treat the latest as the user's final intent).
 func (s *Store) GetVoters(ctx context.Context) ([]*VoterSummary, error) {
 	query := `
+		WITH latest_votes AS (
+			SELECT DISTINCT ON (github_user, pr_number)
+				github_user, github_user_id, choice, pr_number, occurred_at
+			FROM events
+			WHERE type = 'reaction' AND choice IS NOT NULL AND comment_id IS NULL
+			ORDER BY github_user, pr_number, occurred_at DESC
+		)
 		SELECT
 			github_user,
 			github_user_id,
@@ -349,8 +359,7 @@ func (s *Store) GetVoters(ctx context.Context) ([]*VoterSummary, error) {
 			MIN(occurred_at) as first_vote,
 			MAX(occurred_at) as last_vote,
 			array_agg(DISTINCT pr_number ORDER BY pr_number) FILTER (WHERE pr_number IS NOT NULL) as prs_voted_on
-		FROM events
-		WHERE type = 'reaction' AND choice IS NOT NULL AND comment_id IS NULL
+		FROM latest_votes
 		GROUP BY github_user, github_user_id
 		ORDER BY total_votes DESC
 	`
@@ -390,14 +399,21 @@ func (s *Store) GetVoters(ctx context.Context) ([]*VoterSummary, error) {
 	return voters, nil
 }
 
-// GetPRVotes retrieves vote breakdown for a specific PR
+// GetPRVotes retrieves vote breakdown for a specific PR.
+// Uses "last vote wins" deduplication per user.
 func (s *Store) GetPRVotes(ctx context.Context, prNumber int) (upvotes int, downvotes int, err error) {
 	query := `
+		WITH latest_votes AS (
+			SELECT DISTINCT ON (github_user)
+				choice
+			FROM events
+			WHERE type = 'reaction' AND pr_number = $1 AND choice IS NOT NULL AND comment_id IS NULL
+			ORDER BY github_user, occurred_at DESC
+		)
 		SELECT
 			COUNT(*) FILTER (WHERE choice = 1) as upvotes,
 			COUNT(*) FILTER (WHERE choice = -1) as downvotes
-		FROM events
-		WHERE type = 'reaction' AND pr_number = $1 AND choice IS NOT NULL AND comment_id IS NULL
+		FROM latest_votes
 	`
 
 	err = s.pool.QueryRow(ctx, query, prNumber).Scan(&upvotes, &downvotes)
@@ -418,13 +434,20 @@ type Stats struct {
 	EventsLastHour int
 }
 
-// GetStats retrieves aggregate statistics for the feed
+// GetStats retrieves aggregate statistics for the feed.
+// Vote counts use "last vote wins" deduplication.
 func (s *Store) GetStats(ctx context.Context) (*Stats, error) {
 	query := `
 		SELECT
 			COUNT(*) as total_events,
-			COUNT(*) FILTER (WHERE type = 'reaction' AND choice IS NOT NULL AND comment_id IS NULL) as total_votes,
-			COUNT(DISTINCT github_user) FILTER (WHERE type = 'reaction' AND choice IS NOT NULL AND comment_id IS NULL) as total_voters,
+			(SELECT COUNT(*) FROM (
+				SELECT DISTINCT ON (github_user, pr_number) 1
+				FROM events
+				WHERE type = 'reaction' AND choice IS NOT NULL AND comment_id IS NULL
+				ORDER BY github_user, pr_number, occurred_at DESC
+			) deduped) as total_votes,
+			(SELECT COUNT(DISTINCT github_user) FROM events
+				WHERE type = 'reaction' AND choice IS NOT NULL AND comment_id IS NULL) as total_voters,
 			MAX(occurred_at) as latest_event,
 			COUNT(*) FILTER (WHERE occurred_at > NOW() - INTERVAL '1 hour') as events_last_hour
 		FROM events
@@ -484,9 +507,17 @@ func (s *Store) GetByIssue(ctx context.Context, issueNumber int) ([]*Event, erro
 	return scanEvents(rows)
 }
 
-// GetVoter retrieves aggregated voting statistics for a single voter
+// GetVoter retrieves aggregated voting statistics for a single voter.
+// Uses "last vote wins" deduplication per PR.
 func (s *Store) GetVoter(ctx context.Context, githubUser string) (*VoterSummary, error) {
 	query := `
+		WITH latest_votes AS (
+			SELECT DISTINCT ON (pr_number)
+				github_user, github_user_id, choice, pr_number, occurred_at
+			FROM events
+			WHERE type = 'reaction' AND choice IS NOT NULL AND comment_id IS NULL AND github_user = $1
+			ORDER BY pr_number, occurred_at DESC
+		)
 		SELECT
 			github_user,
 			github_user_id,
@@ -496,8 +527,7 @@ func (s *Store) GetVoter(ctx context.Context, githubUser string) (*VoterSummary,
 			MIN(occurred_at) as first_vote,
 			MAX(occurred_at) as last_vote,
 			array_agg(DISTINCT pr_number ORDER BY pr_number) FILTER (WHERE pr_number IS NOT NULL) as prs_voted_on
-		FROM events
-		WHERE type = 'reaction' AND choice IS NOT NULL AND comment_id IS NULL AND github_user = $1
+		FROM latest_votes
 		GROUP BY github_user, github_user_id
 	`
 
@@ -537,12 +567,18 @@ type VoteDetail struct {
 	OccurredAt   time.Time
 }
 
-// GetPRVoteDetails retrieves detailed vote information for a PR
+// GetPRVoteDetails retrieves detailed vote information for a PR.
+// Uses "last vote wins" deduplication per user.
 func (s *Store) GetPRVoteDetails(ctx context.Context, prNumber int) ([]*VoteDetail, error) {
 	query := `
 		SELECT github_user, github_user_id, choice, occurred_at
-		FROM events
-		WHERE type = 'reaction' AND pr_number = $1 AND choice IS NOT NULL AND comment_id IS NULL
+		FROM (
+			SELECT DISTINCT ON (github_user)
+				github_user, github_user_id, choice, occurred_at
+			FROM events
+			WHERE type = 'reaction' AND pr_number = $1 AND choice IS NOT NULL AND comment_id IS NULL
+			ORDER BY github_user, occurred_at DESC
+		) latest
 		ORDER BY occurred_at ASC
 	`
 
@@ -643,6 +679,35 @@ func (s *Store) GetPRReactionCounts(ctx context.Context, prNumbers []int) (map[i
 	}
 
 	return result, nil
+}
+
+// NormalizeReactionTypes fixes uppercase GraphQL reaction types in existing data.
+// Converts THUMBS_UP → +1, THUMBS_DOWN → -1, etc. and sets choice accordingly.
+func (s *Store) NormalizeReactionTypes(ctx context.Context) (int64, error) {
+	query := `
+		UPDATE events
+		SET reaction_type = CASE reaction_type
+				WHEN 'THUMBS_UP' THEN '+1'
+				WHEN 'THUMBS_DOWN' THEN '-1'
+				WHEN 'LAUGH' THEN 'laugh'
+				WHEN 'HOORAY' THEN 'hooray'
+				WHEN 'CONFUSED' THEN 'confused'
+				WHEN 'HEART' THEN 'heart'
+				WHEN 'ROCKET' THEN 'rocket'
+				WHEN 'EYES' THEN 'eyes'
+			END,
+			choice = CASE reaction_type
+				WHEN 'THUMBS_UP' THEN 1
+				WHEN 'THUMBS_DOWN' THEN -1
+				ELSE choice
+			END
+		WHERE reaction_type IN ('THUMBS_UP', 'THUMBS_DOWN', 'LAUGH', 'HOORAY', 'CONFUSED', 'HEART', 'ROCKET', 'EYES')
+	`
+	tag, err := s.pool.Exec(ctx, query)
+	if err != nil {
+		return 0, fmt.Errorf("failed to normalize reaction types: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // Count returns the total number of events matching the filters

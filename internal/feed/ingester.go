@@ -769,6 +769,27 @@ func (ing *Ingester) parseGitHubEvent(ctx context.Context, raw *github.RawGitHub
 	return events, nil
 }
 
+// NormalizeReactionContent converts GraphQL uppercase reaction types to REST API format.
+// GraphQL returns THUMBS_UP, THUMBS_DOWN, LAUGH, etc.
+// REST API returns +1, -1, laugh, etc.
+var graphqlReactionMap = map[string]string{
+	"THUMBS_UP":   "+1",
+	"THUMBS_DOWN": "-1",
+	"LAUGH":       "laugh",
+	"HOORAY":      "hooray",
+	"CONFUSED":    "confused",
+	"HEART":       "heart",
+	"ROCKET":      "rocket",
+	"EYES":        "eyes",
+}
+
+func NormalizeReactionContent(content string) string {
+	if mapped, ok := graphqlReactionMap[content]; ok {
+		return mapped
+	}
+	return content // Already in REST format or unknown
+}
+
 // computeContentHash computes SHA256 hash of payload for deduplication
 func computeContentHash(payload []byte) string {
 	hash := sha256.Sum256(payload)
@@ -1027,6 +1048,8 @@ func (ing *Ingester) fetchAndProcessDiscussions(ctx context.Context) {
 
 		// Discussion reactions
 		for _, reaction := range discussion.Reactions {
+			// Normalize GraphQL uppercase types (THUMBS_UP → +1) before storage
+			reaction.Content = NormalizeReactionContent(reaction.Content)
 			reactionPayload, _ := json.Marshal(reaction)
 
 			var choice *int8
