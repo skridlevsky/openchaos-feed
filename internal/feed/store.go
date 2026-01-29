@@ -172,11 +172,12 @@ func (s *Store) GetByID(ctx context.Context, id string) (*Event, error) {
 
 // ListFilters contains filter criteria for listing events
 type ListFilters struct {
-	Types      []EventType
-	PRNumber   *int
-	GitHubUser *string
-	Since      *time.Time
-	Until      *time.Time
+	Types                   []EventType
+	PRNumber                *int
+	GitHubUser              *string
+	Since                   *time.Time
+	Until                   *time.Time
+	ExcludeCommentReactions bool // Hide reaction events that target comments (not PR/issue votes)
 }
 
 // List retrieves events with optional filters, sorting, and pagination
@@ -220,6 +221,9 @@ func (s *Store) listInternal(ctx context.Context, filters *ListFilters, sort str
 			query += fmt.Sprintf(" AND occurred_at <= $%d", argPos)
 			args = append(args, *filters.Until)
 			argPos++
+		}
+		if filters.ExcludeCommentReactions {
+			query += " AND NOT (type = 'reaction' AND comment_id IS NOT NULL)"
 		}
 	}
 
@@ -306,7 +310,7 @@ func (s *Store) GetVoters(ctx context.Context) ([]*VoterSummary, error) {
 			MAX(occurred_at) as last_vote,
 			array_agg(DISTINCT pr_number ORDER BY pr_number) FILTER (WHERE pr_number IS NOT NULL) as prs_voted_on
 		FROM events
-		WHERE type = 'reaction' AND choice IS NOT NULL
+		WHERE type = 'reaction' AND choice IS NOT NULL AND comment_id IS NULL
 		GROUP BY github_user, github_user_id
 		ORDER BY total_votes DESC
 	`
@@ -353,7 +357,7 @@ func (s *Store) GetPRVotes(ctx context.Context, prNumber int) (upvotes int, down
 			COUNT(*) FILTER (WHERE choice = 1) as upvotes,
 			COUNT(*) FILTER (WHERE choice = -1) as downvotes
 		FROM events
-		WHERE type = 'reaction' AND pr_number = $1 AND choice IS NOT NULL
+		WHERE type = 'reaction' AND pr_number = $1 AND choice IS NOT NULL AND comment_id IS NULL
 	`
 
 	err = s.pool.QueryRow(ctx, query, prNumber).Scan(&upvotes, &downvotes)
@@ -379,8 +383,8 @@ func (s *Store) GetStats(ctx context.Context) (*Stats, error) {
 	query := `
 		SELECT
 			COUNT(*) as total_events,
-			COUNT(*) FILTER (WHERE type = 'reaction' AND choice IS NOT NULL) as total_votes,
-			COUNT(DISTINCT github_user) FILTER (WHERE type = 'reaction' AND choice IS NOT NULL) as total_voters,
+			COUNT(*) FILTER (WHERE type = 'reaction' AND choice IS NOT NULL AND comment_id IS NULL) as total_votes,
+			COUNT(DISTINCT github_user) FILTER (WHERE type = 'reaction' AND choice IS NOT NULL AND comment_id IS NULL) as total_voters,
 			MAX(occurred_at) as latest_event,
 			COUNT(*) FILTER (WHERE occurred_at > NOW() - INTERVAL '1 hour') as events_last_hour
 		FROM events
@@ -453,7 +457,7 @@ func (s *Store) GetVoter(ctx context.Context, githubUser string) (*VoterSummary,
 			MAX(occurred_at) as last_vote,
 			array_agg(DISTINCT pr_number ORDER BY pr_number) FILTER (WHERE pr_number IS NOT NULL) as prs_voted_on
 		FROM events
-		WHERE type = 'reaction' AND choice IS NOT NULL AND github_user = $1
+		WHERE type = 'reaction' AND choice IS NOT NULL AND comment_id IS NULL AND github_user = $1
 		GROUP BY github_user, github_user_id
 	`
 
@@ -498,7 +502,7 @@ func (s *Store) GetPRVoteDetails(ctx context.Context, prNumber int) ([]*VoteDeta
 	query := `
 		SELECT github_user, github_user_id, choice, occurred_at
 		FROM events
-		WHERE type = 'reaction' AND pr_number = $1 AND choice IS NOT NULL
+		WHERE type = 'reaction' AND pr_number = $1 AND choice IS NOT NULL AND comment_id IS NULL
 		ORDER BY occurred_at ASC
 	`
 
@@ -524,6 +528,43 @@ func (s *Store) GetPRVoteDetails(ctx context.Context, prNumber int) ([]*VoteDeta
 	}
 
 	return details, nil
+}
+
+// GetCommentReactionCounts returns aggregated reaction counts per comment ID.
+// Returns map[commentID] -> map[reactionType] -> count.
+func (s *Store) GetCommentReactionCounts(ctx context.Context, commentIDs []int64) (map[int64]map[string]int, error) {
+	if len(commentIDs) == 0 {
+		return nil, nil
+	}
+
+	query := `
+		SELECT comment_id, reaction_type, COUNT(*) as cnt
+		FROM events
+		WHERE type = 'reaction' AND comment_id = ANY($1) AND reaction_type IS NOT NULL
+		GROUP BY comment_id, reaction_type
+	`
+
+	rows, err := s.pool.Query(ctx, query, commentIDs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get comment reaction counts: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[int64]map[string]int)
+	for rows.Next() {
+		var commentID int64
+		var reactionType string
+		var count int
+		if err := rows.Scan(&commentID, &reactionType, &count); err != nil {
+			return nil, fmt.Errorf("failed to scan reaction count: %w", err)
+		}
+		if result[commentID] == nil {
+			result[commentID] = make(map[string]int)
+		}
+		result[commentID][reactionType] = count
+	}
+
+	return result, nil
 }
 
 // Count returns the total number of events matching the filters
@@ -558,6 +599,9 @@ func (s *Store) Count(ctx context.Context, filters *ListFilters) (int, error) {
 			query += fmt.Sprintf(" AND occurred_at <= $%d", argPos)
 			args = append(args, *filters.Until)
 			argPos++
+		}
+		if filters.ExcludeCommentReactions {
+			query += " AND NOT (type = 'reaction' AND comment_id IS NOT NULL)"
 		}
 	}
 

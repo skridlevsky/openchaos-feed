@@ -106,7 +106,9 @@ func (h *FeedHandler) List(w http.ResponseWriter, r *http.Request) {
 	cursor := r.URL.Query().Get("cursor")
 
 	// Build filters
-	filters := &feed.ListFilters{}
+	filters := &feed.ListFilters{
+		ExcludeCommentReactions: true, // Hide comment reactions from feed (show inline on comments instead)
+	}
 
 	if typeFilter != "" {
 		for _, t := range strings.Split(typeFilter, ",") {
@@ -160,6 +162,9 @@ func (h *FeedHandler) List(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
+
+	// Attach inline reaction summaries to comment events
+	attachReactionSummaries(ctx, h.store, events)
 
 	// Get total count
 	totalCount, err := h.store.Count(ctx, filters)
@@ -548,6 +553,43 @@ func (h *FeedHandler) Export(w http.ResponseWriter, r *http.Request) {
 
 	if format == "csv" {
 		csvWriter.Flush()
+	}
+}
+
+// commentEventTypes are event types that represent comments (not reactions).
+// These are candidates for inline reaction summaries.
+var commentEventTypes = map[feed.EventType]bool{
+	feed.EventIssueComment:      true,
+	feed.EventReviewComment:     true,
+	feed.EventCommitComment:     true,
+	feed.EventDiscussionComment: true,
+}
+
+// attachReactionSummaries collects comment IDs from comment-type events,
+// queries their aggregated reactions, and attaches them inline.
+func attachReactionSummaries(ctx context.Context, store *feed.Store, events []*feed.Event) {
+	var commentIDs []int64
+	for _, e := range events {
+		if e.CommentID != nil && commentEventTypes[e.Type] {
+			commentIDs = append(commentIDs, *e.CommentID)
+		}
+	}
+	if len(commentIDs) == 0 {
+		return
+	}
+
+	counts, err := store.GetCommentReactionCounts(ctx, commentIDs)
+	if err != nil {
+		slog.Warn("Failed to fetch comment reaction counts", "error", err)
+		return
+	}
+
+	for _, e := range events {
+		if e.CommentID != nil {
+			if summary, ok := counts[*e.CommentID]; ok {
+				e.ReactionSummary = summary
+			}
+		}
 	}
 }
 

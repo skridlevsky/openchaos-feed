@@ -130,6 +130,21 @@ export function EventCard({ event }: { event: FeedEvent }) {
         {event.editHistory && event.editHistory.length > 0 && (
           <EditHistory entries={event.editHistory} />
         )}
+        {event.reactionSummary && Object.keys(event.reactionSummary).length > 0 && (
+          <div className="flex gap-1.5 mt-1.5">
+            {Object.entries(event.reactionSummary)
+              .sort(([, a], [, b]) => b - a)
+              .map(([type, count]) => (
+                <span
+                  key={type}
+                  className="text-xs text-zinc-500 bg-zinc-800/60 px-1.5 py-0.5 rounded-full"
+                >
+                  {REACTION_EMOJI[type] || type}{" "}
+                  <span className="text-zinc-600">{count}</span>
+                </span>
+              ))}
+          </div>
+        )}
       </div>
       <div className="flex flex-col items-end gap-1 mt-1 shrink-0">
         <time

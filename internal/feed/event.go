@@ -78,6 +78,7 @@ type Event struct {
 	EditHistory      json.RawMessage `json:"editHistory"`
 	OccurredAt       time.Time       `json:"occurredAt"`
 	IngestedAt       time.Time       `json:"ingestedAt"`
+	ReactionSummary  map[string]int  `json:"reactionSummary,omitempty"` // Populated post-query for comment events
 }
 
 // EditHistoryEntry records a previous version of comment body before an edit

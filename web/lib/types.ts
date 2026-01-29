@@ -18,6 +18,7 @@ export interface FeedEvent {
   payload?: Record<string, unknown>;
   contentHash: string;
   editHistory?: EditHistoryEntry[];
+  reactionSummary?: Record<string, number>;
   occurredAt: string;
   ingestedAt: string;
 }
