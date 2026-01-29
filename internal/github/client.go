@@ -114,12 +114,15 @@ func readErrorAndClose(resp *http.Response) error {
 
 // GitHubPR represents a PR from GitHub API
 type GitHubPR struct {
+	ID        int64  `json:"id"`
 	Number    int    `json:"number"`
 	Title     string `json:"title"`
+	Body      string `json:"body"`
 	State     string `json:"state"`
 	HTMLURL   string `json:"html_url"`
 	User      struct {
 		Login     string `json:"login"`
+		ID        int64  `json:"id"`
 		AvatarURL string `json:"avatar_url"`
 	} `json:"user"`
 	CreatedAt string `json:"created_at"`
@@ -527,8 +530,10 @@ func (c *Client) GetAllIssues(ctx context.Context, owner, repo string) ([]GitHub
 
 // GitHubIssue represents an issue from GitHub API
 type GitHubIssue struct {
+	ID          int64  `json:"id"`
 	Number      int    `json:"number"`
 	Title       string `json:"title"`
+	Body        string `json:"body"`
 	State       string `json:"state"`
 	HTMLURL     string `json:"html_url"`
 	User        struct {
@@ -735,6 +740,65 @@ func (c *Client) GetForks(ctx context.Context, owner, repo string) ([]Fork, erro
 	}
 
 	return allForks, nil
+}
+
+// GetCompareCommits fetches commits between two SHAs using the Compare API.
+// Returns a simplified commit list matching the PushEvent commits shape.
+func (c *Client) GetCompareCommits(ctx context.Context, owner, repo, base, head string) ([]PushCommit, error) {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/compare/%s...%s", owner, repo, base, head)
+
+	resp, err := c.doRequest(ctx, "GET", url)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, readErrorAndClose(resp)
+	}
+
+	var result struct {
+		Commits []struct {
+			SHA    string `json:"sha"`
+			Commit struct {
+				Message string `json:"message"`
+				Author  struct {
+					Name  string `json:"name"`
+					Email string `json:"email"`
+				} `json:"author"`
+			} `json:"commit"`
+		} `json:"commits"`
+	}
+
+	if err := readAndClose(resp, &result); err != nil {
+		return nil, fmt.Errorf("failed to decode compare response: %w", err)
+	}
+
+	commits := make([]PushCommit, len(result.Commits))
+	for i, c := range result.Commits {
+		commits[i] = PushCommit{
+			SHA:     c.SHA,
+			Message: c.Commit.Message,
+			Author: PushCommitAuthor{
+				Name:  c.Commit.Author.Name,
+				Email: c.Commit.Author.Email,
+			},
+		}
+	}
+
+	return commits, nil
+}
+
+// PushCommit represents a commit in PushEvent payload format
+type PushCommit struct {
+	SHA     string           `json:"sha"`
+	Message string           `json:"message"`
+	Author  PushCommitAuthor `json:"author"`
+}
+
+// PushCommitAuthor represents a commit author
+type PushCommitAuthor struct {
+	Name  string `json:"name"`
+	Email string `json:"email"`
 }
 
 // Fork represents a fork from GitHub API

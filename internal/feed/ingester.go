@@ -401,13 +401,46 @@ func (ing *Ingester) parseGitHubEvent(ctx context.Context, raw *github.RawGitHub
 			return nil, fmt.Errorf("failed to parse PushEvent: %w", err)
 		}
 
+		// GitHub Events API often omits commits from PushEvent payloads.
+		// Enrich with commits from the Compare API if missing.
+		enrichedPayload := raw.Payload
+		if len(payload.Commits) == 0 && payload.Before != "" && payload.Ref != "" {
+			head := payload.After
+			if head == "" {
+				// Events API uses "head" not "after" — extract from raw JSON
+				var rawMap map[string]json.RawMessage
+				if json.Unmarshal(raw.Payload, &rawMap) == nil {
+					if h, ok := rawMap["head"]; ok {
+						var headStr string
+						json.Unmarshal(h, &headStr)
+						head = headStr
+					}
+				}
+			}
+			if head != "" {
+				commits, err := ing.githubClient.GetCompareCommits(ctx, ing.owner, ing.repo, payload.Before, head)
+				if err != nil {
+					slog.Debug("Failed to enrich push with commits", "error", err)
+				} else if len(commits) > 0 {
+					// Rebuild payload with commits injected
+					var payloadMap map[string]interface{}
+					if json.Unmarshal(raw.Payload, &payloadMap) == nil {
+						payloadMap["commits"] = commits
+						if enriched, err := json.Marshal(payloadMap); err == nil {
+							enrichedPayload = enriched
+						}
+					}
+				}
+			}
+		}
+
 		events = append(events, &Event{
 			Type:         EventPush,
 			GitHubUser:   raw.Actor.Login,
 			GitHubUserID: raw.Actor.ID,
 			GitHubID:     rawEventID,
-			Payload:      raw.Payload,
-			ContentHash:  computeContentHash(raw.Payload),
+			Payload:      enrichedPayload,
+			ContentHash:  computeContentHash(enrichedPayload),
 			OccurredAt:   raw.CreatedAt,
 		})
 

@@ -142,6 +142,19 @@ func (s *Store) DeleteByType(ctx context.Context, eventType EventType) (int64, e
 	return tag.RowsAffected(), nil
 }
 
+// DeleteByTypes removes all events matching any of the given types. Returns total rows deleted.
+func (s *Store) DeleteByTypes(ctx context.Context, types []EventType) (int64, error) {
+	typeStrs := make([]string, len(types))
+	for i, t := range types {
+		typeStrs[i] = string(t)
+	}
+	tag, err := s.pool.Exec(ctx, `DELETE FROM events WHERE type = ANY($1)`, typeStrs)
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete events by types: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // DeleteByCommentID removes a comment event when it gets deleted on GitHub
 func (s *Store) DeleteByCommentID(ctx context.Context, commentID int64) error {
 	query := `DELETE FROM events WHERE comment_id = $1`

@@ -68,28 +68,48 @@ func main() {
 	}
 	log.Printf("Found %d PRs\n", len(prs))
 
-	// Insert PR events
+	// Delete old PR events first (they have flat payload shape, not Events API shape)
+	deleted, err := store.DeleteByTypes(ctx, []feed.EventType{
+		feed.EventPROpened, feed.EventPRClosed, feed.EventPRMerged, feed.EventPRReopened,
+	})
+	if err != nil {
+		log.Fatalf("Failed to delete old PR events: %v", err)
+	}
+	if deleted > 0 {
+		log.Printf("  Deleted %d old PR events (will re-insert with correct payload shape)\n", deleted)
+	}
+
+	// Insert PR events with Events API-shaped payloads
 	for i, pr := range prs {
-		// Determine event type based on state
+		// Determine event type and action based on state
 		var eventType feed.EventType
+		var action string
 		if pr.State == "closed" {
+			action = "closed"
 			if pr.Merged {
 				eventType = feed.EventPRMerged
 			} else {
 				eventType = feed.EventPRClosed
 			}
 		} else {
+			action = "opened"
 			eventType = feed.EventPROpened
 		}
 
 		prNumber := pr.Number
-		githubID := int64(pr.Number) // Use PR number as GitHub ID
-		payload, _ := json.Marshal(pr)
+		githubID := pr.ID // Use real GitHub API ID (avoids collision with star user IDs)
+
+		// Build Events API-shaped payload: {action, number, pull_request: {...}}
+		payload, _ := json.Marshal(map[string]interface{}{
+			"action":       action,
+			"number":       pr.Number,
+			"pull_request": pr,
+		})
 
 		event := &feed.Event{
 			Type:         eventType,
 			GitHubUser:   pr.User.Login,
-			GitHubUserID: 0, // PR struct doesn't have user ID in simple form
+			GitHubUserID: pr.User.ID,
 			PRNumber:     &prNumber,
 			GitHubID:     &githubID,
 			Payload:      payload,
@@ -119,23 +139,44 @@ func main() {
 	}
 	log.Printf("Found %d issues\n", len(issues))
 
-	// Insert issue events
+	// Delete old issue events first (they have flat payload shape, not Events API shape)
+	deletedIssues, err := store.DeleteByTypes(ctx, []feed.EventType{
+		feed.EventIssueOpened, feed.EventIssueClosed, feed.EventIssueReopened,
+	})
+	if err != nil {
+		log.Fatalf("Failed to delete old issue events: %v", err)
+	}
+	if deletedIssues > 0 {
+		log.Printf("  Deleted %d old issue events (will re-insert with correct payload shape)\n", deletedIssues)
+	}
+
+	// Insert issue events with Events API-shaped payloads
 	for i, issue := range issues {
 		var eventType feed.EventType
+		var action string
 		if issue.State == "closed" {
 			eventType = feed.EventIssueClosed
+			action = "closed"
 		} else {
 			eventType = feed.EventIssueOpened
+			action = "opened"
 		}
 
 		issueNumber := issue.Number
-		payload, _ := json.Marshal(issue)
+		githubID := issue.ID // Use real GitHub API ID
+
+		// Build Events API-shaped payload: {action, issue: {...}}
+		payload, _ := json.Marshal(map[string]interface{}{
+			"action": action,
+			"issue":  issue,
+		})
 
 		event := &feed.Event{
 			Type:         eventType,
 			GitHubUser:   issue.User.Login,
 			GitHubUserID: issue.User.ID,
 			IssueNumber:  &issueNumber,
+			GitHubID:     &githubID,
 			Payload:      payload,
 			ContentHash:  computeContentHash(payload),
 			OccurredAt:   issue.CreatedAt,
@@ -284,7 +325,7 @@ func main() {
 	log.Println("Step 5/9: Fetching all comments...")
 
 	// Delete old comment events first (they have flat payload shape, not Events API shape)
-	deleted, err := store.DeleteByType(ctx, feed.EventIssueComment)
+	deleted, err = store.DeleteByType(ctx, feed.EventIssueComment)
 	if err != nil {
 		log.Fatalf("Failed to delete old comment events: %v", err)
 	}
